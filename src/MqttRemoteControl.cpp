@@ -11,6 +11,9 @@
 #include "PressureMonitor.h"
 #endif
 
+#if EnableHumidityControlSupport
+#include "HumidityControl.h"
+#endif
 
 extern BrewPiProxy brewpi;
 
@@ -133,6 +136,12 @@ void MqttRemoteControl::_reportData(void){
 		    lastID=_publish(KeyPlato, externalData.plato(),1);
 	    }
 
+    	#if EnableHumidityControlSupport
+	    if(humidityControl.isHumidityValid())  lastID=_publish(KeyFridgeHumidity,humidityControl.humidity());
+	    if(humidityControl.isRoomSensorInstalled())  lastID=_publish(KeyFridgeHumidity,humidityControl.roomHumidity());
+	    #endif
+
+
     	// iSpindel data
 	    float vol=externalData.deviceVoltage();
 	    if(IsVoltageValid(vol)){
@@ -178,9 +187,12 @@ bool MqttRemoteControl::loop(){
             || (now - _connectTime > ReconnectTimerLong)
             ){
             DBG_PRINTF("MQTT:reconnect..\n");
-
+            
             _connectTime = now;
-            _client.connect();
+            if(WiFi.status() == WL_CONNECTED) _client.connect();
+            else{
+                DBG_PRINTF("MQTT:no WiFi\n");                
+            }
         }
     }else{
         // connected
@@ -380,7 +392,7 @@ void MqttRemoteControl::_onModeChange(char* payload,size_t len){
  
     #if SerialDebug
     DBG_PRINTF("MQTT:mode path value:");
-    for(int i=0;i<len;i++)
+    for(size_t i=0;i<len;i++)
         DBG_PRINTF("%c",payload[i]);
     DBG_PRINTF("\n");
     #endif

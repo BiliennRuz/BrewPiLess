@@ -2,14 +2,11 @@
 #define BrewLogger_H
 #include <FS.h>
 
-#if defined(ESP32)
 #if UseLittleFS
-#include <LittleFS.h>
+#include <LITTLEFS.h> //#include <LittleFS.h>
 #else
 #include <SPIFFS.h>
 #endif
-#endif
-extern FS& FileSystem;
 
 #include "BPLSettings.h"
 #include "TimeKeeper.h"
@@ -23,6 +20,7 @@ extern FS& FileSystem;
 #define LOG_PATH "/log"
 
 #define LogBufferSize 1024
+
 // Log tags
 
 #define PeriodTag 0xF0
@@ -52,7 +50,7 @@ extern FS& FileSystem;
 #define INVALID_GRAVITY_INT 0x7FFF
 
 #define VolatileDataHeaderSize 7
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
 #define VolatileHeaderSize ( VolatileDataHeaderSize*2 + 18)
 #else
 #define VolatileHeaderSize ( VolatileDataHeaderSize*2 + 16)
@@ -90,6 +88,7 @@ extern FS& FileSystem;
 #define PressureEncode(p) (((p)>125 || (p)<-50)? INVALID_PRESSURE_INT:(int16_t)(10.0 * ((p) + 100 )+ 0.5))
 #define PressureDecode(p) (float)(p)/10.0
 
+#define MaximumFileRead 1480
 
 class BrewLogger
 {
@@ -106,7 +105,7 @@ public:
 	void rmLog(int index);
 	bool isLogging(void){ return _recording; }
 
-	bool startSession(const char *filename,bool calibrating);
+	bool startSession(const char *filename,bool calibrating,bool wobf=false);
 	void endSession(void);
 	bool resumeSession();
 
@@ -142,7 +141,6 @@ private:
 
 	size_t _logIndex;
 	size_t _savedLength;
-	size_t _lastRead;
 	char _logBuffer[LogBufferSize];
 
 	File    _logFile;
@@ -169,14 +167,18 @@ private:
 	FileIndexes *_pFileInfo;
 	uint8_t _targetPsi;
 
-#if EnableDHTSensorSupport	
+#if EnableHumidityControlSupport	
 	uint8_t _lastHumidity;
 	uint8_t _savedHumidityValue;
+	uint8_t _lastRoomHumidity;
+	uint8_t _savedRoomHumidityValue;
+
 	uint8_t _lastHumidityTarget;
 	uint8_t _savedHumidityTarget;
 #endif
 
 	uint16_t  _headData[VolatileDataHeaderSize];
+	bool _writeOnBufferFull;
 
 	void _resetTempData(void);
 	void _checkspace(void);
@@ -194,8 +196,10 @@ private:
 	void _addOgRecord(uint16_t og);
 	void _addSgRecord(uint16_t sg);
 	void _addGravityRecord(bool isOg, uint16_t gravity);
-#if EnableDHTSensorSupport	
+#if EnableHumidityControlSupport	
 	void _addHumidityRecord(uint8_t humidity);
+	void _addRoomHumidityRecord(uint8_t humidity);
+
 	void _addHumidityTargetRecord(uint8_t target);
 #endif
 

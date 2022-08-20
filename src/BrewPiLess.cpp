@@ -90,21 +90,23 @@ extern "C" {
 
 
 #if UseLittleFS
+#if ESP32
+#include <LITTLEFS.h>
+#else
 #include <LittleFS.h>
+#endif
 #else
 #if defined(ESP32)
 #include <SPIFFS.h>
 #endif
 #endif
 
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
 #include "HumidityControl.h"
 #endif
 
 //WebSocket seems to be unstable, at least on iPhone.
 //Go back to ServerSide Event.
-#define UseWebSocket true
-#define UseServerSideEvent false
 #define ResponseAppleCNA true
 #define CaptivePortalTimeout 180
 
@@ -187,11 +189,6 @@ const char *nocache_list[]={
 "/brewpi.cfg"
 };
 
-#if UseLittleFS
-FS& FileSystem = LittleFS;
-#else
-FS& FileSystem =SPIFFS;
-#endif
 
 //*******************************************
 
@@ -223,9 +220,6 @@ DataLogger dataLogger;
 #endif
 
 
-#if UseServerSideEvent == true
-AsyncEventSource sse(SSE_PATH);
-#endif
 
 extern const uint8_t* getEmbeddedFile(const char* filename,bool &gzip, unsigned int &size);
 
@@ -321,6 +315,25 @@ class BrewPiWebHandler: public AsyncWebHandler
         } else
           request->send(404);
     }
+	#if UseLittleFS
+	void createDirectoryIfNeeded(String path){
+		const char delimitor='/';
+		String rpath=String();
+
+		int from =(path.charAt(0) == delimitor)? 1:0;
+
+		int found;
+		while( (found = path.indexOf(delimitor, from)) >=0){
+			String dir = path.substring(from,found);			
+			rpath = rpath + String(delimitor) + dir;
+			if(! FileSystem.exists(rpath)){
+				DBG_PRINTF("Directory not exists, create %s\n",rpath.c_str());
+				FileSystem.mkdir(rpath);
+			}
+			from = found +1;
+		}
+	}
+	#endif
 
 	void handleFilePuts(AsyncWebServerRequest *request){
 		if(request->hasParam("path", true)
@@ -329,6 +342,9 @@ class BrewPiWebHandler: public AsyncWebHandler
         	ESP.wdtDisable();
 			#endif
     		String file=request->getParam("path", true)->value();
+			#if UseLittleFS
+			createDirectoryIfNeeded(file);
+			#endif
     		File fh= FileSystem.open(file, "w");
     		if(!fh){
     			request->send(500);
@@ -470,24 +486,7 @@ public:
 	void handleRequest(AsyncWebServerRequest *request){
 		SystemConfiguration *syscfg=theSettings.systemConfiguration();
 
-		#if UseServerSideEvent == true
-	 	if(request->method() == HTTP_GET && request->url() == POLLING_PATH) {
-	 		char *line=brewPi.getLastLine();
-	 		if(line[0]!=0) request->send(200, "text/plain", line);
-	 		else request->send(200, "text/plain;", "");
-	 	}
-		 else if(request->method() == HTTP_POST && request->url() == PUTLINE_PATH){
-	 		String data=request->getParam("data", true, false)->value();
-	 		//DBG_PRINTF("putline:%s\n",data.c_str());
 
-			if(data.startsWith("j") && !request->authenticate((const char*)syscfg->username,(const char*) syscfg->password))
-		        return request->requestAuthentication();
-
-	 		brewPi.putLine(data.c_str());
-	 		request->send(200,"application/json","{}");
-	 	}
-		else
-		#endif
 
 		#if SupportMqttRemoteControl
 		if(request->method() == HTTP_GET && request->url() == MQTT_PATH){
@@ -532,6 +531,10 @@ public:
 					request->send(200,"application/json","{}");
 					display.setAutoOffPeriod(theSettings.systemConfiguration()->backlite);
 
+					#if TWOFACED_LCD
+					sharedDisplayManager.setDisplayMode(theSettings.systemConfiguration()->displayMode);
+					#endif
+
 					if(oldMode !=  theSettings.systemConfiguration()->wifiMode){
 						DBG_PRINTF("change from %d to %d\n",oldMode,theSettings.systemConfiguration()->wifiMode);
 						WiFiSetup.setMode((WiFiMode) (theSettings.systemConfiguration()->wifiMode));
@@ -551,13 +554,13 @@ public:
   			}
 	 	}else if(request->method() == HTTP_GET &&  request->url() == TIME_PATH){
 			AsyncResponseStream *response = request->beginResponseStream("application/json");
-			response->printf("{\"t\":\"%s\",\"e\":%lu,\"o\":%d}",TimeKeeper.getDateTimeStr(),TimeKeeper.getTimeSeconds(),TimeKeeper.getTimezoneOffset());
+			response->printf("{\"t\":\"%s\",\"e\":%lu,\"o\":%d}",TimeKeeper.getDateTimeStr(),(unsigned long)TimeKeeper.getTimeSeconds(),TimeKeeper.getTimezoneOffset());
 			request->send(response);
 		}else if(request->method() == HTTP_POST &&  request->url() == TIME_PATH){
 			if(request->hasParam("time", true)){
 				  AsyncWebParameter* tvalue = request->getParam("time", true);
 				  time_t time=(time_t)tvalue->value().toInt();
-  				DBG_PRINTF("Set Time:%lu from:%s\n",time,tvalue->value().c_str());
+  				DBG_PRINTF("Set Time:%lu from:%s\n",(unsigned long)time,tvalue->value().c_str());
 	 			TimeKeeper.setCurrentTime(time);
 			 }
 			 if(request->hasParam("off", true)){
@@ -702,9 +705,10 @@ public:
 						theSettings.save();
 						PressureMonitor.configChanged();
 						request->send(200,"application/json","{}");
-					}else
+					}else{
 						DBG_PRINTF("invalid Json\n");
 						request->send(402);
+					}
 				}else{
 					DBG_PRINTF("no data\n");
 					request->send(401);
@@ -712,7 +716,7 @@ public:
 			}
 		}
 		#endif
-		#if EnableDHTSensorSupport
+		#if EnableHumidityControlSupport
 		else if(request->url() == HUMIDITY_CONTROL_PATH){
 			if(request->hasParam("m",true) &&  request->hasParam("t",true) ){
 				uint8_t mode=(uint8_t) request->getParam("m",true)->value().toInt();
@@ -778,9 +782,7 @@ public:
 	bool canHandle(AsyncWebServerRequest *request){
 	 	if(request->method() == HTTP_GET){
 	 		if( request->url() == CONFIG_PATH || request->url() == TIME_PATH
-			#if UseServerSideEvent == true
-			|| request->url() == POLLING_PATH 
-			#endif
+
 			 || request->url() == RESETWIFI_PATH  
 			 || request->url() == GETSTATUS_PATH
 			 || request->url() == BEER_PROFILE_PATH
@@ -811,9 +813,7 @@ public:
 				return true;
 	 	}else if(request->method() == HTTP_POST){
 	 		if(
-				#if UseServerSideEvent == true
-				 request->url() == PUTLINE_PATH || 
-				#endif
+
 			 request->url() == CONFIG_PATH
 	 			|| request->url() ==  FPUTS_PATH || request->url() == FLIST_PATH
 	 			|| request->url() == TIME_PATH
@@ -828,7 +828,7 @@ public:
 				#if SupportPressureTransducer
 				|| request->url() == PRESSURE_PATH
 				#endif
-				#if EnableDHTSensorSupport
+				#if EnableHumidityControlSupport
 				|| request->url() == HUMIDITY_CONTROL_PATH
 				#endif
 	 			)
@@ -945,7 +945,7 @@ void greeting(std::function<void(const char*)> sendFunc)
 	doc["ptc"]= serialized(parasiteTempController.getSettings());
 #endif
 
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
 	JsonObject hum = doc.createNestedObject("rh");
 	hum["m"] = humidityControl.mode();
 	hum["t"] = humidityControl.targetRH();
@@ -970,7 +970,6 @@ void greeting(std::function<void(const char*)> sendFunc)
 
 
 
-#if UseWebSocket == true
 
 class AWSClient{
 	uint32_t _clientId;
@@ -1008,7 +1007,7 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
 	if(type == WS_EVT_CONNECT){
     	DBG_PRINTF("ws[%s][%u] connect\n", server->url(), client->id());
     	//client->printf("Hello Client %u :)", client->id());
-    	client->ping();
+    	//client->ping();
 		#if GreetingInMainLoop
 		_lastWSclient = client;
 		#else
@@ -1062,19 +1061,14 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
       	}
     }
 }
-#endif //#if UseWebSocket == true
 
 void stringAvailable(const char *str)
 {
 	//DBG_PRINTF("BroadCast:%s\n",str);
 
-#if UseWebSocket == true
 	ws.textAll(str);
-#endif
 
-#if UseServerSideEvent == true
-	sse.send(str);
-#endif
+
 }
 
 void notifyLogStatus(void)
@@ -1125,10 +1119,14 @@ void reportRssi(void)
 	doc["psi"] = (int) PressureMonitor.currentPsi();
 #endif
 
-#if EnableDHTSensorSupport
-	if (humidityControl.sensorInstalled()){
+#if EnableHumidityControlSupport
+	if (humidityControl.isChamberSensorInstalled()){
 		doc["h"]= humidityControl.humidity();
 	}
+	if (humidityControl.isRoomSensorInstalled()){
+		doc["hr"]= humidityControl.roomHumidity();
+	}
+
 #endif
 
 
@@ -1146,47 +1144,14 @@ void reportRssi(void)
 }
 
 
-#if UseServerSideEvent
-#if GreetingInMainLoop 
 
-AsyncEventSourceClient *_lastClient=NULL;
-
-void sayHelloSSE()
-{
-	if(! _lastClient) return;
-
-	DBG_PRINTF("SSE Connect\n");
-	greeting([=](const char* msg){
-		_lastClient->send(msg);
-	});
-	_lastClient = NULL;
-}
-
-void onClientConnected(AsyncEventSourceClient *client)
-{
-	_lastClient = client;
-}
-
-#else
-void onClientConnected(AsyncEventSourceClient *client){
-	DBG_PRINTF("SSE Connect\n");
-	greeting([=](const char* msg){
-		client->send(msg);
-	});
-}
-#endif
-#endif
 
 #if GreetingInMainLoop 
 void sayHello()
 {
-#if UseServerSideEvent
-	sayHelloSSE();
-#endif 
 
-#if UseWebSocket == true
+
 	sayHelloWS();
-#endif
 }
 #endif 
 
@@ -1232,8 +1197,13 @@ public:
 					tiltwater=request->getParam("tw")->value().toFloat();
 					hydroreading=request->getParam("hr")->value().toFloat();
 				}
+				bool wobf=false;
+				
+				if(request->hasParam("wobf")){
+					wobf = ( 0!= request->getParam("wobf")->value().toInt());
+				}
 
-				if(brewLogger.startSession(filename.c_str(),cal)){
+				if(brewLogger.startSession(filename.c_str(),cal,wobf)){
 					if(cal){
 						brewLogger.addTiltInWater(tiltwater,hydroreading);
 						externalData.setCalibrating(true);
@@ -1304,11 +1274,10 @@ public:
 				// client in volatile Logging mode. force to reload
 				offset=0;
 			}
-
 			size_t size=brewLogger.beginCopyAfter(offset);
 			if(size >0){
-				request->send("application/octet-stream", size, [](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-					return brewLogger.read(buffer, maxLen,index);
+				request->send("application/octet-stream", size, [=](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+					return brewLogger.read(buffer, maxLen,index+offset);
 				});
 			}else{
 				request->send(204);
@@ -1399,7 +1368,7 @@ public:
 				request->send(400);
 				return;
 			}
-			stringAvailable(_buffer);
+			stringAvailable(_buffer); // send to brower to log on Javascript Console
 			processGravity(request,_data,_dataLength);
 			// Process the name
 			externalData.sseNotify(_data);
@@ -1435,6 +1404,7 @@ public:
 			}else{
 				request->send(400);
 			}
+			return;
 		}//else{
 			// get
 		if(request->hasParam("data")){
@@ -1605,7 +1575,18 @@ void wiFiEvent(const char* msg){
 	if(WiFi.status() == WL_CONNECTED){
 		DBG_PRINTF("channel:%d, BSSID:%s\n",WiFi.channel(),WiFi.BSSIDstr().c_str());
 		if(! TimeKeeper.isSynchronized())TimeKeeper.updateTime();
+
+/*		if (!MDNS.begin(theSettings.systemConfiguration()->hostnetworkname,WiFi.localIP())) {
+			DBG_PRINTF("Error setting mDNS responder\n");
+		}else{
+			MDNS.addService("http", "tcp", 80);
+		}
+		MDNS.notifyAPChange(); */
+
 	}
+	#if SMART_DISPLAY
+	smartDisplay.setIp(WiFi.localIP());
+	#endif
 }
 
 void tiltScanResult(String& result){
@@ -1716,10 +1697,28 @@ void brewpiLoop(void)
 
 #if BREWPI_MENU
 		if (rotaryEncoder.pushed()) {
+			#if TWOFACED_LCD
+			// might not be necessary, pickSettingToChange() will go into a loop until
+			// end of menu
+			sharedDisplayManager.forcePrimary(true);
+			#endif
 			rotaryEncoder.resetPushed();
 			display.updateBacklight();
 			menu.pickSettingToChange();
+			#if TWOFACED_LCD
+			sharedDisplayManager.forcePrimary(false);
+			rotaryEncoder.setRange(1,0,2);
+			#endif
 		}
+		#if TWOFACED_LCD
+		if(rotaryEncoder.changed()){
+			int16_t s=rotaryEncoder.read();
+			DBG_PRINTF("rotaryEncoder.read()=%d\n",s);
+			if(s==0) sharedDisplayManager.previous();
+			else sharedDisplayManager.next();
+			rotaryEncoder.setRange(1,0,2);
+		}
+		#endif
 #endif
 
 		// update the lcd for the chamber being displayed
@@ -1740,73 +1739,6 @@ void brewpiLoop(void)
 }
 
 //}brewpi
-
-
-#ifdef STATUS_LINE
-extern void makeTime(time_t timeInput, struct tm &tm);
-
-typedef enum _StatusLineDisplayItem{
-StatusLineDisplayIP=0,
-StatusLineDisplayTime
-}StatusLineDisplayItem;
-
-#define DisplayTimeDuration 8
-#define DisplayIPDuration 3
-
-class StatusLine{
-protected:
-	static time_t _displayTime;
-	static time_t _switchTime;
-	static StatusLineDisplayItem _displaying;
-
-	static void _printTime(time_t now){
-		struct tm t;
-		if(_displayTime == now) return;
-		_displayTime = now;
-		makeTime(TimeKeeper.getLocalTimeSeconds(),t);
-		char buf[21];
-		sprintf(buf,"%d/%02d/%02d %02d:%02d:%02d",t.tm_year,t.tm_mon,t.tm_mday,t.tm_hour,t.tm_min,t.tm_sec);
-		display.printStatus(buf);
-	}
-	static void _printIP(void){
-		
-		IPAddress ip =(WiFiSetup.isApMode())? WiFi.softAPIP():WiFi.localIP();
-		char buf[21];
-		sprintf(buf,"IP:%d.%d.%d.%d",ip[0],ip[1],ip[2],ip[3]);
-		display.printStatus(buf);
-	}
-
-public:
-	StatusLine(){
-	}
-
-
-	static void loop(time_t now){	
-		if(now == _displayTime) return;
-
-		if(_displaying == StatusLineDisplayIP){
-			if(now - _switchTime > DisplayIPDuration){
-				_printTime(now);
-				_switchTime = now;
-				_displaying = StatusLineDisplayTime;
-			}
-		}else if(_displaying == StatusLineDisplayTime){
-			if(now - _switchTime > DisplayTimeDuration){
-				_printIP();
-				_switchTime = now;
-				_displaying = StatusLineDisplayIP;
-			}else _printTime(now);
-		}
-	}
-};
-time_t StatusLine::_displayTime;
-time_t  StatusLine::_switchTime;
-StatusLineDisplayItem StatusLine::_displaying = StatusLineDisplayTime;
-
-
-StatusLine statusLine;
-#endif
-
 
 
 #define SystemStateOperating 0
@@ -1833,6 +1765,57 @@ uint32_t _lcdReinitTime;
 #endif
 
 
+
+
+
+#if BREWPI_IIC_LCD
+
+void scanI2C(void) //VTODO
+{
+	DBG_PRINTF("Scanning I2C\n");
+	Wire.begin(PIN_SDA,PIN_SCL);
+	byte error, address;
+    //Serial.println("Scan LCD Address...\n");
+
+ 	for(address = 127; address > 0; address-- )
+  	{
+    	// The i2c_scanner uses the return value of
+    	// the Write.endTransmisstion to see if
+    	// a device did acknowledge to the address.
+		#if EnableBME280Support
+		if(address == 0x76 || address==0x77) continue;
+		#endif
+
+    	#if RotaryViaPCF8574 || ButtonViaPCF8574
+    	if(address == PCF8574_ADDRESS) continue;
+    	#endif
+
+		Wire.beginTransmission(address);
+    	error = Wire.endTransmission();
+
+		#if PressureViaADS1115
+    	if(error == 0 && address == ADS1115_ADDRESS){
+			DBG_PRINTF("Found ADS11115\n");
+			continue;
+		}
+    	#endif
+
+
+    	if (error == 0)
+    	{			
+      		DBG_PRINTF("I2C device found at address %x\n",address);
+			#if TWOFACED_LCD
+	      	SharedDisplayManager::i2cLcdAddr = address;
+			#else
+	      	LcdDisplay::i2cLcdAddr = address;
+			#endif
+    	}
+    }
+}
+
+#endif
+
+
 void setup(void){
 
 	#if SerialDebug == true
@@ -1842,9 +1825,10 @@ void setup(void){
   	#endif
 
 	//0.Initialize file system
+
 	//start SPI Filesystem
 #if defined(ESP32)
-  	if(!SPIFFS.begin(true)){
+  	if(!FileSystem.begin(true)){
 #else
 	if(!FileSystem.begin()){
 #endif
@@ -1853,7 +1837,13 @@ void setup(void){
   	}else{
   		DBG_PRINTF("FileSystem.begin() Success.\n");
   	}
+#if BREWPI_IIC_LCD
+	scanI2C();
+#endif
 
+#if TWOFACED_LCD
+	sharedDisplayManager.init();
+#endif
 
 #ifdef EARLY_DISPLAY
 	DBG_PRINTF("Init LCD...\n");
@@ -1862,7 +1852,6 @@ void setup(void){
 	display.updateBacklight();
 	DBG_PRINTF("LCD Initialized..\n");
 #endif
-
 
 	// try open configuration
 	theSettings.load();
@@ -1898,7 +1887,11 @@ void setup(void){
 #endif
 
   	DBG_PRINTF("WiFi Done!\n");
-
+	int wait=5;
+	while(wait>0 && WiFi.status() != WL_CONNECTED){
+		delay(1000);
+		wait--;
+	}
 	// get time
 	initTime(WiFiSetup.isApMode());
 
@@ -1924,34 +1917,23 @@ void setup(void){
 #if ResponseAppleCNA == true
 	webServer->addHandler(&appleCNAHandler);
 #endif
+	externalDataHandler.loadConfig();
 
-#if UseWebSocket == true
 	ws.onEvent(onWsEvent);
 	webServer->addHandler(&ws);
-#endif
-
-#if UseServerSideEvent == true
-	sse.onConnect(onClientConnected);
-	webServer->addHandler(&sse);
-#endif
-
+	webServer->addHandler(&logHandler);
+	webServer->addHandler(&externalDataHandler);
+	webServer->addHandler(&networkConfig);
 	webServer->addHandler(&brewPiWebHandler);
 
-	webServer->addHandler(&logHandler);
-
-	externalDataHandler.loadConfig();
-	webServer->addHandler(&externalDataHandler);
-
-	webServer->addHandler(&networkConfig);
 	//3.1.2 file system is part of the serving pages
 	//server.serveStatic("/", file system, "/","public, max-age=259200"); // 3 days
 
 #if defined(ESP32)
 	webServer->on("/fs",[](AsyncWebServerRequest *request){
-		request->send(200,"","totalBytes:" +String(SPIFFS.totalBytes()) +
-		" usedBytes:" + String(SPIFFS.usedBytes()) +
+		request->send(200,"","totalBytes:" +String(FileSystem.totalBytes()) +
+		" usedBytes:" + String(FileSystem.usedBytes()) +
 		" heap:"+String(ESP.getFreeHeap()));
-		//testSPIFFS();
 	});
 #else
 	webServer->on("/fs",[](AsyncWebServerRequest *request){
@@ -1965,6 +1947,15 @@ void setup(void){
 		//testSPIFFS();
 	});
 #endif
+
+    #if DebugSharedDisplay
+	webServer->on("/dbdisplay",[](AsyncWebServerRequest *request){
+		String info;
+		sharedDisplayManager.debug(info);
+		request->send(200,"",info);
+	});
+    #endif
+
 	// 404 NOT found.
   	//called when the url is not defined here
 	webServer->onNotFound([](AsyncWebServerRequest *request){
@@ -2002,10 +1993,6 @@ void setup(void){
 	parasiteTempController.init();
 #endif
 
-
-#ifdef STATUS_LINE
-	statusLine.loop(0);
-#endif
 #ifdef EMIWorkaround
 	_lcdReinitTime = millis();
 #endif
@@ -2015,11 +2002,23 @@ void setup(void){
 	mqttRemoteControl.begin();
 #endif
 
-	#if EnableDHTSensorSupport
+	#if EnableHumidityControlSupport
 	humidityControl.begin();
 	#endif
 
+#if SMART_DISPLAY
+	sharedDisplayManager.add(&smartDisplay);
+#endif
 
+
+#if TWOFACED_LCD
+	rotaryEncoder.setRange(1,0,2);
+	sharedDisplayManager.setDisplayMode(theSettings.systemConfiguration()->displayMode);
+#endif
+
+	#if ESP8266 
+	wifi_set_sleep_type(NONE_SLEEP_T);
+	#endif
 }
 
 uint32_t _rssiReportTime;
@@ -2045,16 +2044,19 @@ void loop(void){
 #endif
 	time_t now=TimeKeeper.getTimeSeconds();
 
-#ifdef EMIWorkAround
+#ifdef EMIWorkaround
 	if( (millis() - _lcdReinitTime) > LCDReInitPeriod){
 		_lcdReinitTime=millis();
-		display.fresh();
+		display.refresh();
+		//DBG_PRINTF("Refresh LCD\n");
 	}
 #endif
 
-#ifdef STATUS_LINE
-	statusLine.loop(now);
+
+#if TWOFACED_LCD
+	sharedDisplayManager.loop();
 #endif
+
 	if( (now - _rssiReportTime) > RssiReportPeriod){
 		_rssiReportTime =now;
 		reportRssi();
@@ -2089,7 +2091,7 @@ void loop(void){
 	tiltListener.loop();
 	#endif
 
-	#if EnableDHTSensorSupport
+	#if EnableHumidityControlSupport
 	humidityControl.loop();
 	#endif
 

@@ -1,11 +1,13 @@
 #ifdef ESP8266
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
 #elif defined(ESP32)
 #include <WiFi.h>
 #include <WebServer.h>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <ESPmDNS.h>
 #endif
 
 //needed for library
@@ -105,7 +107,7 @@ void WiFiSetupClass::begin(WiFiMode mode, char const *ssid,const char *passwd,ch
 	_apName=(ssid == NULL || *ssid=='\0')? DEFAULT_HOSTNAME:ssid;	
 	_apPassword=(passwd !=NULL && *passwd=='\0')? NULL:passwd;
 
-
+	WiFi.setAutoConnect(true);
 	WiFi.mode(mode2use);
 	// start AP
 	if( mode2use == WIFI_AP || mode2use == WIFI_AP_STA){
@@ -120,15 +122,16 @@ void WiFiSetupClass::begin(WiFiMode mode, char const *ssid,const char *passwd,ch
 		}else{
 			// the weird printout of "[NO IP]" implies that explicitly specification of DHCP 
 			// might be necessary.
-			DBG_PRINTF("Unset IP:%d\n",(u32_t)_ip);
+			DBG_PRINTF("Dynamic IP\n");
 			WiFi.config( IPAddress(0,0,0,0),IPAddress(0,0,0,0), IPAddress(0,0,0,0));
 		}
 		WiFi.setAutoReconnect(true);		
 		
 		wl_status_t status;
 		if(targetSSID) status= WiFi.begin(targetSSID,targetPass);
-		else WiFi.begin();
+		else status=WiFi.begin();
 		DBG_PRINTF("WiFi.begin() return:%d\n",status);
+		(void) status;
 		_time=millis();
 	}
 	_wifiState=(mode2use == WIFI_AP)? WiFiStateDisconnected:WiFiStateConnectionRecovering;
@@ -165,7 +168,7 @@ bool WiFiSetupClass::isConnected(void){
 	return WiFi.status() == WL_CONNECTED;
 }
 
-void WiFiSetupClass::onConnected(){
+void WiFiSetupClass::onStatus(){
 	if(_eventHandler){
 		_eventHandler(status().c_str());
 	}
@@ -200,7 +203,12 @@ bool WiFiSetupClass::stayConnected(void)
 			//DBG_PRINTF("Disconnect\n");
 			//}
 			WiFiMode mode= WiFi.getMode();
-			if(mode == WIFI_AP) WiFi.mode(WIFI_AP_STA);
+			if(mode == WIFI_AP){
+				WiFi.mode(WIFI_AP_STA);
+				#if ESP8266
+				MDNS.notifyAPChange();
+				#endif
+			}
 
 			if(_ip != INADDR_NONE){
 				WiFi.config(_ip,_gw,_nm,_dns);
@@ -231,27 +239,48 @@ bool WiFiSetupClass::stayConnected(void)
 				}else if (_mode == WIFI_STA){
 				}
 				WiFi.mode(_mode);
+				#if ESP8266
+				MDNS.notifyAPChange();
+				#endif
+
 
 			}else if(mode == WIFI_STA){
 				if( _mode == WIFI_AP_STA){
 					WiFi.mode(_mode);
+				#if ESP8266
+				MDNS.notifyAPChange();
+				#endif
+
 					createNetwork();
 					setupApService();
 				}else if (_mode == WIFI_AP){
 					//WiFi.disconnect();
 					_wifiState =WiFiStateDisconnected;
 					WiFi.mode(_mode);
+					#if ESP8266
+					MDNS.notifyAPChange();
+					#endif
+
 				}
 
 			}else if(mode == WIFI_AP){
-				if(_mode == WIFI_AP_STA) WiFi.mode(_mode);
+				if(_mode == WIFI_AP_STA){
+					WiFi.mode(_mode);
+					#if ESP8266
+					MDNS.notifyAPChange();
+					#endif
+				}
 				WiFi.begin();
 				_wifiState =WiFiStateConnectionRecovering;
 				_time=millis();
 
 				if(_mode == WIFI_STA){
-					if(WiFi.SSID() == NULL || WiFi.SSID() == "")
+					if(WiFi.SSID() == NULL || WiFi.SSID() == ""){
 						WiFi.mode(WIFI_AP_STA);
+						#if ESP8266
+						MDNS.notifyAPChange();
+						#endif
+					}
 					// just keep WIFI_AP_Mode in case Network isn't specified
 				}
 			}
@@ -261,6 +290,7 @@ bool WiFiSetupClass::stayConnected(void)
  			{
 				wifi_info("**disc:");
 				if(_mode != WIFI_AP){
+					onStatus();
 					DBG_PRINTF("Lost Network.WiFi.status()= %d\n",WiFi.status());
 					_wifiState = WiFiStateConnectionRecovering;
 					if(_targetSSID) WiFi.begin(_targetSSID,_targetPass);
@@ -295,7 +325,7 @@ bool WiFiSetupClass::stayConnected(void)
 				}else{
 				// in AP_STA or STA mode
 					if( millis() -  _time  > TimeWaitToRecoverNetwork){
-  						DBG_PRINTF("Start recovering\n");
+  						DBG_PRINTF("Start recovering, wifi.status=%d\n",WiFi.status());
 						// WiFi.mode(WIFI_AP_STA);
 						DBG_PRINTF("retry SSID:%s\n",_targetSSID? _targetSSID:"NULL");
 						if(_targetSSID) WiFi.begin(_targetSSID,_targetPass);
@@ -322,10 +352,13 @@ bool WiFiSetupClass::stayConnected(void)
 				if(WiFi.getMode() != _mode){
 					DBG_PRINTF("Change mode to desired:%d from %d\n",_mode,WiFi.getMode());
 					WiFi.mode(_mode);
+					#if ESP8266
+					MDNS.notifyAPChange();
+					#endif
 				}
 				
 				wifi_info("WiFi Connected:");
-				onConnected();
+				onStatus();
 			}
 		 }
   } // end of connected
@@ -353,6 +386,9 @@ String WiFiSetupClass::scanWifi(void) {
 	if(WiFi.getMode() == WIFI_AP){
 		apmode=true;
 		WiFi.mode(WIFI_AP_STA);
+		#if ESP8266
+		MDNS.notifyAPChange();
+		#endif
 	}
 
 	String rst="{\"list\":[";
@@ -419,6 +455,9 @@ String WiFiSetupClass::scanWifi(void) {
 	DBG_PRINTF("scan result:%s\n",rst.c_str());
 	if(apmode){
 		WiFi.mode(WIFI_AP);
+		#if ESP8266
+		MDNS.notifyAPChange();
+		#endif
 	}
 
 	return rst;

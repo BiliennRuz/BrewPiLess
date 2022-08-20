@@ -1,5 +1,5 @@
 # BrewPiLess
- **Note: ALL BPL settings will be gone after upgrading to v3.0**
+ **Note: Beer Profile exteds to maximum 10 steps. Your setting might lost. There is an utility, /extra/backup.htm. You can upload this file and use it to backup/restore the settings.**
 
 ## Features
  * I2C LCD support.
@@ -42,7 +42,19 @@ You will need to run the hardware setup procedure after upgrading to v2.4 from p
  The log format before v2.0 is vulnerable. There seems to be some unconsidered conditions that break the log. 
 
 ## Version History
-** Framework 2.2.0 can't but, but with framworks other than that, sometimes my controller can't connect to my AP. It's still under investigation.**
+ * 4.2
+    * BMP280 support
+    * Using environment temperature as room/chamber temperature
+    * extend maximum Beer Profile to 10 steps.
+    * experimental Humidity control
+    * Rotating LCD for extra information, like iSpiondel information, Humidity, and pressure.
+    * Dedicated additional iSpindel display of SSD1306 OLED LCD.
+    * New 'Write on buffer full' option for logging to reduce flash writing.
+    * Backup/restore settings
+    * LittleFS replaces SPIFFS for all ESP8266.
+    * LittleFS is default for ESP32.
+    * Partition table for ESP32 has changed. Flash via USB might be necessary.
+
  * 4.1
     * "Real" generic HTTP logging.
     * DHT1x/DHT2x support, for humidity control 

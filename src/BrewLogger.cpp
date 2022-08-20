@@ -5,12 +5,13 @@
 #include "PressureMonitor.h"
 #endif
 
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
 #include "HumidityControl.h"
 #endif
 
 #define LoggingPeriod 60000  //in ms
 #define MinimumGapToSync  600  // in seconds
+
 
 BrewLogger brewLogger;
 
@@ -23,8 +24,9 @@ BrewLogger::BrewLogger(void){
 	_lastPressureReading = INVALID_PRESSURE_INT;
 	_targetPsi =0;
 
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
 	_lastHumidity = INVALID_HUMIDITY_VALUE;
+	_lastRoomHumidity = INVALID_HUMIDITY_VALUE;
 	_lastHumidityTarget = INVALID_HUMIDITY_VALUE;
 #endif
 }
@@ -50,8 +52,8 @@ BrewLogger::BrewLogger(void){
 	String BrewLogger::fsinfo(void)
 	{
 #if defined(ESP32)
-		String ret=String("{\"size\":") + String(SPIFFS.totalBytes())
-			+",\"used\":"  + String(SPIFFS.usedBytes())
+		String ret=String("{\"size\":") + String(FileSystem.totalBytes())
+			+",\"used\":"  + String(FileSystem.usedBytes())
 //			+",\"block\":" + String(fs_info.blockSize)
 //			+",\"page\":"  + String(fs_info.pageSize)
 			+"}";
@@ -88,6 +90,7 @@ BrewLogger::BrewLogger(void){
 		ret += ",\"fs\":" + fsinfo();
 
 		ret += ",\"plato\":" + String(theSettings.GravityConfig()->usePlato? "1":"0");
+		ret += ",\"wobf\":" + String(_writeOnBufferFull? "1":"0");
 
 		ret += ",\"list\":[";
 
@@ -128,27 +131,31 @@ BrewLogger::BrewLogger(void){
 	{
     	_resumeLastLogTime = _pFileInfo->starttime;
 
-		char filename[36];
+		char filename[128];
 		sprintf(filename,"%s/%s",LOG_PATH,_pFileInfo->logname);
+		// debug
+		if(FileSystem.exists(filename)){
+			DBG_PRINTF("%s exists\n",filename);
+		}else{
+			DBG_PRINTF("%s doesnot exists\n",filename);
+		}
+
 #if ESP32
+	#if UseLittleFS
+		_logFile=FileSystem.open(filename,"r");
+	#else
 		// weird behavior of ESP32
 		_logFile=FileSystem.open(filename,"r");
+	#endif
 #else
 		_logFile=FileSystem.open(filename,"a+");
 #endif
 		if(! _logFile){
-            DBG_PRINTF("resume failed\n");
+            DBG_PRINTF("!!!! fail to open, resume failed\n");
             return false;
 		}
-		size_t fsize= _logFile.size(); 	
-		DBG_PRINTF("resume file:%s size:%d\n",filename,fsize);
+		DBG_PRINTF("resume file:%s size:%d\n",filename, _logFile.size());
 
-/*		if(fsize < 8){
-            DBG_PRINTF("resume failed\n");
-			_logFile.close();
-			return false;
-		}
-*/
 		int dataRead;
 		size_t offset=0;
 		int    processIndex=0;
@@ -266,11 +273,8 @@ BrewLogger::BrewLogger(void){
 		if(processIndex !=dataRead) {
 			DBG_PRINTF("Incomplete record:%d\n",dataRead-processIndex);
 		}
-		// seek for SeekEnd might has a bug. use 
-		//_logFile.seek(dataAvail,SeekEnd);
-		//_logFile.seek(fsize,SeekSet);
 		_logIndex =0;
-		_savedLength = fsize;
+		_savedLength =  _logFile.size();
 		DBG_PRINTF("resume, total _savedLength:%d, _logIndex:%d\n",_savedLength,_logIndex);
 
 		_lastTempLog=0;
@@ -292,21 +296,39 @@ BrewLogger::BrewLogger(void){
 #endif
 		return true;
 	}
-	bool BrewLogger::startSession(const char *filename,bool calibrating){		
+	bool BrewLogger::startSession(const char *filename,bool calibrating,bool wobf){
 		if(_recording) return false; // alread start
+
+		_pFileInfo->writeOnBufferFull = _writeOnBufferFull = wobf;
 
 		if(_fsspace < 100){
 			DBG_PRINTF("Not enough space:%d\n",_fsspace);
 			return false;
 		}
 		strcpy(_pFileInfo->logname,filename);
-		char buff[36];
+		char buff[128];
 		sprintf(buff,"%s/%s",LOG_PATH,filename);
-
+		#if ESP32
+		#if UseLittleFS
+		if(!FileSystem.exists(LOG_PATH)){
+			if(FileSystem.mkdir(LOG_PATH)){
+				DBG_PRINTF("*%s Created",LOG_PATH);
+			}else{
+				DBG_PRINTF("***%s failed to creat",LOG_PATH);
+				return false;
+			}
+		}
 		_logFile=FileSystem.open(buff,"a+");
+		#else
+		// weird behaviour of ESP32 SPIFFS
+		_logFile=FileSystem.open(buff,"a+");
+		#endif
+		#else
+		_logFile=FileSystem.open(buff,"a+");
+		#endif
 
 		if(!_logFile){
-			DBG_PRINTF("Error open temp file\n");
+			DBG_PRINTF("***Error open temp file\n");
 			return false;
 		}
 
@@ -331,11 +353,16 @@ BrewLogger::BrewLogger(void){
 		_addModeRecord(_mode);
 		_addStateRecord(_state);
 
-		#if EnableDHTSensorSupport
-		if(humidityControl.sensorInstalled()){
+		#if EnableHumidityControlSupport
+		if(humidityControl.isChamberSensorInstalled()){
 			uint8_t humidity = humidityControl.humidity();
 			_lastHumidity=humidity;
 			_addHumidityRecord(humidity);
+		}
+		if(humidityControl.isRoomSensorInstalled()){
+			uint8_t humidity = humidityControl.roomHumidity();
+			_lastRoomHumidity=humidity;
+			_addRoomHumidityRecord(humidity);
 		}
 		#endif
 
@@ -348,6 +375,23 @@ BrewLogger::BrewLogger(void){
 
 	void BrewLogger::endSession(void){
 		if(!_recording) return;
+		
+		if(_writeOnBufferFull){
+			if(_logIndex >0){
+				size_t wlen=_logFile.write((const uint8_t*)_logBuffer,_logIndex);
+				DBG_PRINTF("Finished Log writen  %d\n",wlen);
+
+				if(wlen != _logIndex){
+					DBG_PRINTF("!!!write failed @ %d\n",_logIndex);
+				}
+				#if ESP32
+				#if UseLittleFS
+				_logFile.flush();
+				#endif
+				#endif
+			}
+		}
+
 		_recording=false;
 		_calibrating=false;
 		_logFile.close();
@@ -524,14 +568,25 @@ BrewLogger::BrewLogger(void){
 		}
 		#endif
 
-		#if EnableDHTSensorSupport
-		if(humidityControl.sensorInstalled()){
+		#if EnableHumidityControlSupport
+		if(humidityControl.isChamberSensorInstalled() || 
+			humidityControl.isRoomSensorInstalled() ){
 			// To save memory, only log when data changes.
-			uint8_t humidity = humidityControl.humidity();
-			if(_lastHumidity !=humidity){
-				_lastHumidity=humidity;
-				_addHumidityRecord(humidity);
+			if(humidityControl.isChamberSensorInstalled()){
+					uint8_t humidity = humidityControl.humidity();
+				if(_lastHumidity !=humidity){
+					_lastHumidity=humidity;
+					_addHumidityRecord(humidity);
+				}
 			}
+			if(humidityControl.isRoomSensorInstalled()){
+					uint8_t humidity = humidityControl.roomHumidity();
+				if(_lastRoomHumidity !=humidity){
+					_lastRoomHumidity=humidity;
+					_addRoomHumidityRecord(humidity);
+				}
+			}
+
 			uint8_t target = humidityControl.targetRH();
 			if(_lastHumidityTarget !=target){
 				_lastHumidityTarget =target;
@@ -545,7 +600,6 @@ BrewLogger::BrewLogger(void){
 	{
 		//for recording log only.
 		if(!_recording) return 0;
-		_lastRead = last;
 		// _logIndex: data in buffer
 		// _savedLength: data in file. However, all data are "writen" to file at the first place.
 		//               Though, some data might remain in write buffer.
@@ -562,51 +616,67 @@ BrewLogger::BrewLogger(void){
 		return ( _logIndex+_savedLength - last);
 	}
 
-	size_t BrewLogger::read(uint8_t *buffer, size_t maxLen, size_t index)
-	
+	size_t BrewLogger::read(uint8_t *buffer, size_t maxLen, size_t index)	
 	{
-		size_t sizeRead;
-		// index is start of "this" read. _lastRead is the starting of request
-		// rindex is the real index of the whole log
-		size_t rindex= index + _lastRead;
+		size_t sizeRead ;
 
-		DBG_PRINTF("read index:%u, max:%u, _lastRead =%u, rindex=%u\n",index,maxLen,_lastRead,rindex);
+		DBG_PRINTF("read index:%u, max:%u\n",index,maxLen);
 
 		// the reqeust data index is more than what we have.
-		if(rindex > (_savedLength +_logIndex)) return maxLen; // return whatever it wants.
+		if(index > (_savedLength +_logIndex)) return 0; // return whatever it wants.
     
 		// the staring data is not in buffer
-		if( rindex < _savedLength){
+		if( index < _savedLength){
+			size_t totalAvail = _savedLength +_logIndex - index;
 
-			sizeRead = _savedLength +_logIndex - rindex;
-			if(sizeRead > maxLen) sizeRead=maxLen;
+			size_t size2Read  = (totalAvail > maxLen)? maxLen:totalAvail;
 
-			_logFile.seek(rindex,SeekSet);
+			size_t sizeAavailFromFile =_savedLength - index;
 
-			sizeRead=_logFile.read(buffer,sizeRead);
+			size_t sizeReadFromFile = (size2Read > sizeAavailFromFile)? sizeAavailFromFile:size2Read;
 
-			if(sizeRead < maxLen){
-				DBG_PRINTF("!Error: file read:%u of %u, file size:%u\n",sizeRead,maxLen,_logFile.size());
-				size_t insufficient = maxLen - sizeRead;
+			_logFile.seek(index,SeekSet);
+
+			#if ReadFileByPortion
+			sizeRead=0;
+			size_t left = sizeReadFromFile;
+			size_t toRead;
+			do{
+				toRead = (left > MaximumFileRead)? MaximumFileRead:left;
+				sizeRead += _logFile.read(buffer+sizeRead,toRead);
+				left -= toRead;
+			}while(left>0);
+
+			#else
+			sizeRead=_logFile.read(buffer,sizeReadFromFile);
+			#endif
+
+			if(sizeRead != sizeReadFromFile){
+				DBG_PRINTF("!!!Error: file read:%u of %u, file size:%u\n",sizeRead,maxLen,_logFile.size());
+			}
+
+			if(sizeRead < size2Read){
+				size_t insufficient = size2Read - sizeRead;
                 if(insufficient > _logIndex){
                     size_t fillsize=insufficient - _logIndex;
                     memset(buffer + sizeRead,FillTag,fillsize);
                     sizeRead += fillsize;
                     insufficient = _logIndex;
-    				DBG_PRINTF("!Error: fill blank:%u\n",fillsize);
+    				DBG_PRINTF("!!!Error: fill blank:%u\n",fillsize);
                 }
                 memcpy(buffer+ sizeRead,_logBuffer,insufficient);
 				sizeRead += insufficient;
 			}
-			DBG_PRINTF("read file:%u\n",sizeRead);
+			DBG_PRINTF("read file:%u, total:%u\n",sizeReadFromFile,sizeRead);
+
 		}else{
 			//DBG_PRINTF("read from buffer\n");
 			// read from buffer
-			rindex -=  _savedLength;
-			// rindex should be smaller than _logIndex
-			sizeRead = _logIndex - rindex;
+			size_t mIndex = index - _savedLength;
+			// index should be smaller than _logIndex
+			sizeRead = _logIndex - mIndex;
 			if(sizeRead > maxLen) sizeRead=maxLen;
-			memcpy(buffer,_logBuffer+rindex,sizeRead);
+			memcpy(buffer,_logBuffer+mIndex,sizeRead);
 			DBG_PRINTF("read buffer:%u\n",sizeRead);
 		}
 		
@@ -759,7 +829,7 @@ BrewLogger::BrewLogger(void){
 		_extGravity=INVALID_GRAVITY_INT;
 		_extOriginGravity=INVALID_GRAVITY_INT;
 		_extTileAngle = INVALID_TILT_ANGLE;
-		#if EnableDHTSensorSupport
+		#if EnableHumidityControlSupport
 		_savedHumidityValue = 0xFF;
 		#endif
 	}
@@ -769,7 +839,7 @@ BrewLogger::BrewLogger(void){
 	void BrewLogger::_checkspace(void)
 	{
 #if defined(ESP32)
-		_fsspace = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+		_fsspace = FileSystem.totalBytes() - FileSystem.usedBytes();
 
 		if(_fsspace > RESERVED_SIZE){
 			_fsspace -= RESERVED_SIZE;
@@ -831,7 +901,7 @@ BrewLogger::BrewLogger(void){
 		*ptr++ = TargetPsiTag; //15		
 		*ptr++ = _targetPsi;  // 16
 
-		#if EnableDHTSensorSupport
+		#if EnableHumidityControlSupport
 
 		// to simplify, just let deocoder ignore invalid dataset
 		// 
@@ -965,7 +1035,7 @@ BrewLogger::BrewLogger(void){
 				dataDrop +=4;
 			}else{
 
-				#if EnableDHTSensorSupport
+				#if EnableHumidityControlSupport
 				if(HumidityTag ==  _logBuffer[idx]){
 					_savedHumidityValue = _logBuffer[idx+1];
 				}
@@ -1001,10 +1071,27 @@ BrewLogger::BrewLogger(void){
 		if(!_recording){
 			return _volatileLoggingAlloc(size);
 		}
+
 		if((_logIndex+size) > LogBufferSize){
 			DBG_PRINTF("buffer full, %d + %d >= %d! saved=%d\n",_logIndex,size,LogBufferSize,_savedLength);
-				_savedLength += _logIndex;
-				_logIndex =0;
+
+			if(_writeOnBufferFull){
+				size_t wlen=_logFile.write((const uint8_t*)_logBuffer,_logIndex);
+				DBG_PRINTF("Log writen  %d\n",wlen);
+
+				if(wlen != _logIndex){
+					DBG_PRINTF("!!!write failed @ %d\n",_logIndex);
+				}
+				#if ESP32
+				#if UseLittleFS
+				_logFile.flush();
+				#endif
+
+				#endif
+			}
+
+			_savedLength += _logIndex;
+			_logIndex =0;
 		}
 		if(size >= _fsspace){
 			// run out of space.
@@ -1037,33 +1124,25 @@ BrewLogger::BrewLogger(void){
 				_logIndex -= LogBufferSize;
 			return;
 		}
-		char *buf = _logBuffer + idx;
+		if(!_writeOnBufferFull){
+			char *buf = _logBuffer + idx;
 
-
-		int wlen;
-		if(idx + len <= LogBufferSize){
-			// continues block
-			wlen=_logFile.write((const uint8_t*)buf,len);
-		}else{
-			wlen=_logFile.write((const uint8_t*)buf,LogBufferSize - idx);
-			buf = _logBuffer;
-			int nlen = len  + idx -LogBufferSize;
-			wlen += _logFile.write((const uint8_t*)buf,nlen);
+			int wlen;
+			if(idx + len <= LogBufferSize){
+				// continues block
+				wlen=_logFile.write((const uint8_t*)buf,len);
+			}else{
+				wlen=_logFile.write((const uint8_t*)buf,LogBufferSize - idx);
+				buf = _logBuffer;
+				int nlen = len  + idx -LogBufferSize;
+				wlen += _logFile.write((const uint8_t*)buf,nlen);
+			}
+			#if ESP32
+			#if UseLittleFS
+			_logFile.flush();
+			#endif
+			#endif
 		}
-		/*
-		if(len !=(wlen=_logFile.write((const uint8_t*)buf,len))){
-
-			DBG_PRINTF("!!!write failed @ %d\n",_logIndex);
-			_logFile.close();
-			char buff[36];
-			sprintf(buff,"%s/%s",LOG_PATH,_pFileInfo->logname);
-
-			_logFile=FileSystem.open(buff,"a+");
-			_logFile.write((const uint8_t*)buf+wlen,len-wlen);
-		}*/
-
-		//frequent writing is not good for flash.
-		//_logFile.flush();
 		
 	}
 
@@ -1107,12 +1186,20 @@ BrewLogger::BrewLogger(void){
 		_commitData(idx,2);
 	}
 
-#if EnableDHTSensorSupport	
+#if EnableHumidityControlSupport	
 	void BrewLogger::_addHumidityRecord(uint8_t humidity){
 		int idx = _allocByte(2);
 		if(idx < 0) return;
 		_writeBuffer(idx,HumidityTag); //*ptr = TargetPsiTag;
 		_writeBuffer(idx+1,humidity); //*(ptr+1) = mode;
+		_commitData(idx,2);
+	}
+
+	void BrewLogger::_addRoomHumidityRecord(uint8_t humidity){
+		int idx = _allocByte(2);
+		if(idx < 0) return;
+		_writeBuffer(idx,HumidityTag); //*ptr = TargetPsiTag;
+		_writeBuffer(idx+1,humidity | 0x80); //*(ptr+1) = mode;
 		_commitData(idx,2);
 	}
 
@@ -1174,6 +1261,7 @@ BrewLogger::BrewLogger(void){
 	void BrewLogger::_loadIdxFile(void)
 	{
         _pFileInfo = theSettings.logFileIndexes();
+		_writeOnBufferFull = _pFileInfo->writeOnBufferFull;
 	}
 
 	void BrewLogger::_saveIdxFile(void)

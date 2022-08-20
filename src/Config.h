@@ -91,6 +91,30 @@
 //
 //////////////////////////////////////////////////////////////////////////
 
+//////////////////////////////////////////////////////////////////////////
+//
+// Enable humidity sensor
+//
+#ifndef EnableBME280Support
+#define EnableBME280Support true
+#endif
+//
+//////////////////////////////////////////////////////////////////////////
+#ifndef EnableHumidityControlSupport
+#define EnableHumidityControlSupport true
+#endif
+
+#if EnableHumidityControlSupport
+#if !EnableBME280Support && !EnableDHTSensorSupport
+#error "Humidity Sesonr is needed to support Humidity Control"
+#endif
+#else
+#undef EnableDHTSensorSupport 
+#define EnableDHTSensorSupport false
+#undef EnableBME280Support 
+#define EnableBME280Support false
+
+#endif
 
 //////////////////////////////////////////////////////////////////////////
 //
@@ -277,7 +301,6 @@
 #define EnableGravitySchedule true
 #define ENABLE_LOGGING 1
 #define EARLY_DISPLAY 1
-#define EMIWorkaround 1
 
 //#ifdef EnableGlycolSupport
 #define FridgeSensorFallBack true
@@ -286,11 +309,7 @@
 
 #ifndef UseLittleFS
 
-#if ESP32
-#define UseLittleFS false
-#else
-#define UseLittleFS false
-#endif
+#define UseLittleFS true
 
 #endif
 
@@ -298,7 +317,12 @@
 #define FS_EEPROM true
 #endif
 
-#define BPL_VERSION "4.1"
+#define BPL_VERSION "4.2"
+
+
+#ifndef MORE_PINS_CONFIGURATION
+#define MORE_PINS_CONFIGURATION true
+#endif
 
 //////////////////////////////////////////////////////////////////////////
 //
@@ -332,8 +356,18 @@
 #define actuatorPin4  27
 #define actuatorPin5  26
 
-#define BuzzPin       18
+#if MORE_PINS_CONFIGURATION
 
+#define actuatorPin6  18
+
+#define fanPin 14
+#define doorPin 34
+
+#define BuzzPin 4
+
+#else
+#define BuzzPin       18
+#endif
 // 34,35,66,39 input only
 #define rotaryAPin      32
 #define rotaryBPin      33
@@ -453,6 +487,8 @@
 
 #if BREWPI_LCD
 // LCD configurations:
+#define EMIWorkaround 1
+
 #if OLED_LCD
 #define BREWPI_OLED128x64_LCD 1
 #else
@@ -460,12 +496,33 @@
 #endif
 #endif
 
+#ifndef TWOFACED_LCD
+#define TWOFACED_LCD true
+#endif
+
+#ifndef ISPINDEL_DISPLAY
+#if OLED_LCD
+#define ISPINDEL_DISPLAY true
+#else
+#define ISPINDEL_DISPLAY false
+#endif
+#endif
+
+#if TWOFACED_LCD
+    #define SMART_DISPLAY true
+    #if ISPINDEL_DISPLAY
+        #if ! OLED_LCD
+        #error "ISPINDEL_DISPLAY is only available for OLED display"    
+        #endif
+    #endif
+#endif
+
 #define IIC_LCD_ADDRESS 0x27
 #define LCD_AUTO_ADDRESSING true
 
 #ifdef BREWPI_OLED128x64_LCD
 #define OLED128x64_LCD_ADDRESS 0x3c
-#define STATUS_LINE 1
+#define STATUS_LINE true
 //////////////////////////////////////////////////////////////////////////
 //
 // OLED orientation
@@ -535,7 +592,6 @@
 #define SettableMinimumCoolTime true
 //#endif
 
-#define EMIWorkaround 1
 
 #if ESP32
 #define SupportTiltHydrometer true
@@ -576,3 +632,22 @@
 #define DEFAULT_HOSTNAME "brewpiless"
 #define DEFAULT_USERNAME "brewpiless"
 #define DEFAULT_PASSWORD "brewpiless"
+
+
+#if UseLittleFS
+#if ESP32
+#define FileSystem LITTLEFS
+#else
+#define FileSystem  LittleFS
+#endif
+#else
+#define FileSystem SPIFFS
+#endif
+
+
+#if ESP32
+// when read logs, ESP32, or AsyncTCP to be exact, would request 5623 bytes
+// it seems stressful to SPIFFS. Using this option to read file in a small 
+// portion, 1480. 
+#define ReadFileByPortion true
+#endif

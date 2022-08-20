@@ -18,7 +18,8 @@ typedef struct _SystemConfiguration{
     uint8_t passwordLcd;
     uint8_t wifiMode;
     uint32_t dns;
-    uint8_t _padding[4];
+    uint8_t  displayMode;
+    uint8_t _padding[3];
 }SystemConfiguration;
 
 //*****************************************************
@@ -73,7 +74,7 @@ typedef struct _TiltConfiguratoin{
 
 // 
 #define InvalidStableThreshold 0xFF
-#define MaximumSteps 7
+#define MaximumSteps 10
 // datys are encoded by *100
 #define ScheduleDayFromJson(d)  ((uint16_t) ((d) * 100.0))
 #define ScheduleDayToJson(d)  ((float)(d)/100.0)
@@ -110,7 +111,7 @@ typedef struct _ScheduleStep{
     char     condition;
     uint8_t _padding[2];
 } ScheduleStep; // 12bytes
-// 12 * 7 +12 = 96
+// 12 * 10 +12 = 132
 typedef struct _BeerTempSchedule{
 	ScheduleStep steps[MaximumSteps];
 	time_t   startDay;
@@ -144,7 +145,8 @@ typedef struct _FileIndexes
 	FileIndexEntry files[MAX_LOG_FILE_NUMBER];
 	char logname[MaximumLogFileName];
 	unsigned long starttime;
-    uint8_t _padding[8];
+    uint8_t writeOnBufferFull;
+    uint8_t _padding[7];
 } FileIndexes;
 
 //*****************************************************
@@ -310,7 +312,7 @@ struct Settings{
 #if SupportTiltHydrometer
     TiltConfiguration tiltConfiguration;
 #endif
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
     HumidityControlSettings humidityControl;
 #endif
 };
@@ -385,7 +387,7 @@ public:
 #endif
 
 
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
     HumidityControlSettings* humidityControlSettings(void){ return & _data.humidityControl;}
 #endif
 
@@ -404,9 +406,27 @@ protected:
 #if EanbleParasiteTempControl   
     void defaultParasiteTempControlSettings(void);
 #endif
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
     void defaultHumidityControlSettings(void);
 #endif
+    void defaultMqttSetting(void);
+
+    bool systemConfigurationSanity(void);
+    bool timeInformationSanity(void);
+    bool gravityConfigSantiy(void);
+    bool beerProfileSanity(void);
+    bool logFileIndexesSanity(void);
+    bool remoteLoggingSanity(void);
+    bool autoCapSettingsSanity(void);
+#if EanbleParasiteTempControl   
+    bool parasiteTempControlSettingsSanity(void);
+#endif
+#if EnableHumidityControlSupport
+    bool humidityControlSettingsSanity(void);
+#endif
+
+    bool mqttSettingSanity(void);
+
 };
 
 extern BPLSettings theSettings;

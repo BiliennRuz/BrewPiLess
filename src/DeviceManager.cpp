@@ -28,6 +28,7 @@
 #include "TempSensorExternal.h"
 #include "PiLink.h"
 #include "EepromFormat.h"
+#include "Wire.h"
 
 #if AUTO_CAP
 #include "AutoCapControl.h"
@@ -56,11 +57,8 @@ WirelessTempSensor* WirelessTempSensor::theWirelessTempSensor=NULL;
 
 #if EnableDHTSensorSupport
 #include "HumidityControl.h"
-#include "TempSensorDHT.h"
-
-inline bool isDHTSensorInstalled(){
-	return HumidityControl::dhtSensor != NULL;
-}
+#include "Bme280Sensor.h"
+#include "TempSensorEnv.h"
 
 #endif
 
@@ -102,6 +100,12 @@ bool DeviceManager::firstDeviceOutput;
 bool DeviceManager::isDefaultTempSensor(BasicTempSensor* sensor) {
 	return sensor==&defaultTempSensor;
 }
+#if EnableHumidityControlSupport
+bool isEnvironmentSensorAvailable(){
+	return humidityControl.roomSensor != &nullEnvironmentSensor
+			|| humidityControl.chamberSensor != &nullEnvironmentSensor;
+}
+#endif
 
 /**
  * Sets devices to their unconfigured states. Each device is initialized to a static no-op instance.
@@ -138,16 +142,14 @@ void* DeviceManager::createDevice(DeviceConfig& config, DeviceType dt)
 			#endif
 
 #if EnableDHTSensorSupport 
-			else if(dt==DEVICETYPE_HUMIDITY_SENSOR)
-			{
+			else if(dt == DEVICETYPE_ENVIRONMENT_SENSOR){
 //				Serial.printf("create sensorType:%d, pinNr:%d\n",config.hw.humiditySensorType,config.hw.pinNr);
 				// calibration for temperature is in fixed_4_4 fromat
-				return new DHTSensor(config.hw.pinNr,config.hw.humiditySensorType,
-				tempDiffToInt(temperature(config.hw.calibration)<<(TEMP_FIXED_POINT_BITS-CALIBRATION_OFFSET_PRECISION)));
+				DHTSensor *dht= new DHTSensor(config.hw.pinNr,config.hw.humiditySensorType);
+				dht->setHumidityCalibration(tempDiffToInt(temperature(config.hw.calibration)<<(TEMP_FIXED_POINT_BITS-CALIBRATION_OFFSET_PRECISION)));
+				return dht;
 			}
 #endif
-
-
 			else
 #if BREWPI_SIMULATE
 				return new ValueActuator();
@@ -167,8 +169,16 @@ void* DeviceManager::createDevice(DeviceConfig& config, DeviceType dt)
 #endif
 
 #if EnableDHTSensorSupport 
-		case DEVICE_HARDWARE_DHT_TEMP:
-			return new DHTTempSensor(config.hw.calibration);
+		case DEVICE_HARDWARE_ENVIRONMENT_TEMP:
+			return new EnvTempSensor( config.hw.pinNr==0? HumidityControl::chamberSensor:HumidityControl::roomSensor,
+				config.hw.calibration); //VTODO
+#endif				
+#if EnableBME280Support
+		case DEVICE_HARDWARE_BME280:{
+			Bme280Sensor* bme=new Bme280Sensor(config.hw.pinNr);
+			bme->setHumidityCalibration(tempDiffToInt(temperature(config.hw.calibration)<<(TEMP_FIXED_POINT_BITS-CALIBRATION_OFFSET_PRECISION)));
+			return bme;
+		}
 #endif
 
 
@@ -238,9 +248,14 @@ inline void** deviceTarget(DeviceConfig& config)
 
 #if EnableDHTSensorSupport	
 	case DEVICE_CHAMBER_HUMIDITY_SENSOR:
-		ppv =(void**) & humidityControl.dhtSensor;
+		ppv =(void**) & humidityControl.chamberSensor;
 		break;
-	
+
+	case DEVICE_CHAMBER_ROOM_HUMIDITY_SENSOR:
+		ppv =(void**) & humidityControl.roomSensor;
+		break;
+
+
 	case DEVICE_CHAMBER_HUMIDIFIER:
 		ppv = (void**) & humidityControl.humidifier;
 		break;
@@ -321,10 +336,11 @@ void DeviceManager::uninstallDevice(DeviceConfig& config)
 			}
 			break;
 		#if EnableDHTSensorSupport	 
-		case DEVICETYPE_HUMIDITY_SENSOR:
-			if (*ppv!=&defaultSensor) {
-				delete (DHTSensor*)*ppv;
-				*ppv = NULL;
+		case DEVICETYPE_ENVIRONMENT_SENSOR:
+			if (*ppv!=&nullEnvironmentSensor) {
+				if( ((EnvironmentSensor*)*ppv)->sensorType() == SensorType_BME280)  delete (Bme280Sensor*)*ppv;
+				else delete (DHTSensor*)*ppv;
+				*ppv = &nullEnvironmentSensor;
 			}
 			break;
 		#endif
@@ -370,7 +386,8 @@ void DeviceManager::installDevice(DeviceConfig& config)
 #endif
 			break;
 		#if EnableDHTSensorSupport
-		case DEVICETYPE_HUMIDITY_SENSOR:	
+		case DEVICETYPE_ENVIRONMENT_SENSOR:	
+		//fall through
 		#endif
 		case DEVICETYPE_SWITCH_ACTUATOR:
 		case DEVICETYPE_SWITCH_SENSOR:
@@ -434,7 +451,6 @@ void handleDeviceDefinition(const char* key, const char* val, void* pv)
 {
 	DeviceDefinition* def = (DeviceDefinition*) pv;
 //	logDebug("deviceDef %s:%s", key, val);
-
 	// the characters are listed in the same order as the DeviceDefinition struct.
 	int8_t idx = indexOf(DeviceDefinition::ORDER, key[0]);
 	if (key[0]==DEVICE_ATTRIB_ADDRESS)
@@ -458,6 +474,7 @@ void assignIfSet(int8_t value, uint8_t* target) {
 	if (value>=0)
 		*target = (uint8_t)value;
 }
+#define assignIfSetMacro(value,target,type)  if ((value)>=0) target =(type) value;
 
 /**
  * Updates the device definition. Only changes that result in a valid device, with no conflicts with other devices
@@ -485,11 +502,17 @@ void DeviceManager::parseDeviceDefinition()
 	piLink.print("target Chamber: %d, target Beer: %d, target Function: %d, target Hardware: %d, target PinNr: %d\r\n", target.chamber,
 		target.beer, target.deviceFunction, target.deviceHardware, target.hw.pinNr);
 #endif
+
 	assignIfSet(dev.chamber, &target.chamber);
 	assignIfSet(dev.beer, &target.beer);
-	assignIfSet(dev.deviceFunction, (uint8_t*)&target.deviceFunction);
-	assignIfSet(dev.deviceHardware, (uint8_t*)&target.deviceHardware);
+//	assignIfSet(dev.deviceFunction, (uint8_t*)&target.deviceFunction);
+//	assignIfSet(dev.deviceHardware, (uint8_t*)&target.deviceHardware);
+//  above code woudl break when the size of enum is 4. 
+	assignIfSetMacro(dev.deviceFunction, target.deviceFunction, DeviceFunction);
+	assignIfSetMacro(dev.deviceHardware, target.deviceHardware, DeviceHardware);
+
 	assignIfSet(dev.pinNr, &target.hw.pinNr);
+//	Serial.printf("sizeof(target.deviceFunction) =%d, sizeof(uint8_t)=%d\n",sizeof(target.deviceFunction), sizeof(uint8_t));
 
 #if EnableDHTSensorSupport
 	assignIfSet(dev.hsensorType, &target.hw.humiditySensorType);
@@ -502,15 +525,17 @@ void DeviceManager::parseDeviceDefinition()
 	if (dev.calibrationAdjust!=-1)		// since this is a union, it also handles pio for 2413 sensors
 		target.hw.calibration = dev.calibrationAdjust;
 
-	assignIfSet(dev.invert, (uint8_t*)&target.hw.invert);
-
+	//assignIfSet(dev.invert, (uint8_t*)&target.hw.invert);
+	assignIfSetMacro(dev.invert, target.hw.invert,bool);
+	
 	if (dev.address[0] != 0xFF) {// first byte is family identifier. I don't have a complete list, but so far 0xFF is not used.
 #ifndef ESP8266_ONE
 		piLink.print("Dev Address: %s, Target Address: %s\r\n", dev.address, target.hw.address);
 #endif
 		memcpy(target.hw.address, dev.address, 8);
 	}
-	assignIfSet(dev.deactivate, (uint8_t*)&target.hw.deactivate);
+	//assignIfSet(dev.deactivate, (uint8_t*)&target.hw.deactivate);
+	assignIfSetMacro(dev.deactivate, target.hw.deactivate,bool);
 
 	// setting function to none clears all other fields.
 	if (target.deviceFunction==DEVICE_NONE) {
@@ -679,7 +704,7 @@ void DeviceManager::printDevice(device_slot_t slot, DeviceConfig& config, const 
 	appendAttrib(deviceString, DEVICE_ATTRIB_DEACTIVATED, config.hw.deactivate);
 	appendAttrib(deviceString, DEVICE_ATTRIB_PIN, config.hw.pinNr);
 #if EnableDHTSensorSupport
-	if(config.deviceFunction == DEVICE_CHAMBER_HUMIDITY_SENSOR)
+	if(config.deviceFunction == DEVICE_CHAMBER_HUMIDITY_SENSOR) //VTODO: PIN device: DHT serious, DEVICE_HARDWARE_BME280
 		appendAttrib(deviceString,DEVICE_ATTRIB_HUMIDITY_SENSOR_TYPE,config.hw.humiditySensorType);
 #endif
 	if (value && *value) {
@@ -706,8 +731,8 @@ void DeviceManager::printDevice(device_slot_t slot, DeviceConfig& config, const 
 #endif	
 #if EnableDHTSensorSupport
 
-		||  config.deviceFunction==DEVICE_CHAMBER_HUMIDITY_SENSOR
-		||  config.deviceHardware==DEVICE_HARDWARE_DHT_TEMP
+		||  config.deviceFunction==DEVICE_CHAMBER_HUMIDITY_SENSOR //VTODO
+		||  config.deviceHardware==DEVICE_HARDWARE_ENVIRONMENT_TEMP
 #endif
 	) {
 		tempDiffToString(buf, temperature(config.hw.calibration)<<(TEMP_FIXED_POINT_BITS-CALIBRATION_OFFSET_PRECISION), 3, 8);
@@ -813,11 +838,11 @@ device_slot_t findHardwareDevice(DeviceConfig& find)
 					// fall through
 				case DEVICE_HARDWARE_PIN:
 					match &= find.hw.pinNr==config.hw.pinNr;
-					//fall through
+					break;
 			#if EnableDHTSensorSupport
-				case DEVICE_HARDWARE_DHT_TEMP:
-					match &= isDHTSensorInstalled();
-					//fall through
+				case DEVICE_HARDWARE_ENVIRONMENT_TEMP:
+					match &= isEnvironmentSensorAvailable();
+					break;
 			#endif
 
 			#if BREWPI_EXTERNAL_SENSOR
@@ -981,13 +1006,56 @@ void DeviceManager::enumerateExternalDevices(EnumerateHardware& h, EnumDevicesCa
 #endif
 
 #if EnableDHTSensorSupport
-void DeviceManager::enumerateDHTTempDevices(EnumerateHardware& h, EnumDevicesCallback callback, DeviceOutput& output){
+void DeviceManager::enumerateEnvTempDevices(EnumerateHardware& h, EnumDevicesCallback callback, DeviceOutput& output){
+	DeviceConfig config;
+	EnvironmentSensor *sensors[]={
+		HumidityControl::chamberSensor,
+		HumidityControl::roomSensor
+	};
+
+	for(int i=0; i< 2;i++){
+		if(sensors[i] != & nullEnvironmentSensor){
+			clear((uint8_t*)&config, sizeof(config));
+			config.deviceHardware = DEVICE_HARDWARE_ENVIRONMENT_TEMP;
+			config.chamber = 1; // chamber 1 is default
+			config.hw.pinNr =(uint8_t) i;
+			handleEnumeratedDevice(config, h, callback, output);
+		}
+	}
+}
+#endif
+
+
+#if EnableBME280Support
+#define BME280_ADDRESS (0x77)           // Primary I2C Address
+#define BME280_ADDRESS_ALTERNATE (0x76) // Alternate Address
+
+void DeviceManager::enumerateBME280(EnumerateHardware& h, EnumDevicesCallback callback, DeviceOutput& output){
+	// scan I2C
+	Wire.begin(PIN_SDA,PIN_SCL);
+	const uint8_t addresses[]={BME280_ADDRESS,BME280_ADDRESS_ALTERNATE};
+
 	DeviceConfig config;
 	clear((uint8_t*)&config, sizeof(config));
-	config.deviceHardware = DEVICE_HARDWARE_DHT_TEMP;
+	config.deviceHardware = DEVICE_HARDWARE_BME280;
 	config.chamber = 1; // chamber 1 is default
-	config.hw.pinNr = HumidityControl::dhtSensor->pin();
-	handleEnumeratedDevice(config, h, callback, output);
+
+	uint8_t error,address;
+ 	for(uint32_t ai = 0; ai < sizeof(addresses); ai++ ){
+		address = addresses[ai];
+		
+		Wire.beginTransmission(address);
+    	error = Wire.endTransmission();
+		
+//		Serial.printf("search %x result:%d\n",address,error);
+
+		if(error ==0){
+			// found
+//			Serial.printf("search %x found\n",address);
+			config.hw.pinNr= address;
+			handleEnumeratedDevice(config, h, callback, output);
+		}
+	}
 }
 #endif
 
@@ -1020,11 +1088,17 @@ void DeviceManager::enumerateHardware()
 	#endif
 
 	#if EnableDHTSensorSupport //vito: enumerate device
-	if (isDHTSensorInstalled() &&( spec.hardware==-1 || isDHTTempSensor(DeviceHardware(spec.hardware))) ) {
-		enumerateDHTTempDevices(spec, OutputEnumeratedDevices, out);
+	if (isEnvironmentSensorAvailable() &&( spec.hardware==-1 || isEnvTempSensor(DeviceHardware(spec.hardware))) ) {
+		enumerateEnvTempDevices(spec, OutputEnumeratedDevices, out);
 	}
 	#endif
 
+	#if EnableBME280Support
+	if (spec.hardware==-1 || isBME280(DeviceHardware(spec.hardware))) {
+		enumerateBME280(spec, OutputEnumeratedDevices, out);
+	}
+
+	#endif
 //	logDebug("Enumerating Hardware Complete");
 }
 
@@ -1065,8 +1139,8 @@ void UpdateDeviceState(DeviceDisplay& dd, DeviceConfig& dc, char* val)
 			tempToString(val, temp, 3, 9);
 		}
 #if EnableDHTSensorSupport	
-		else if (dt == DEVICETYPE_HUMIDITY_SENSOR){
-			DHTSensor* sensor = (DHTSensor*) *ppv;
+		else if (dt == DEVICETYPE_ENVIRONMENT_SENSOR){
+			EnvironmentSensor* sensor = (EnvironmentSensor*) *ppv;
 			sprintf_P(val, STR_FMT_D,(int)sensor->humidity());
 		}
 #endif	
@@ -1107,7 +1181,8 @@ DeviceType deviceType(DeviceFunction id) {
 	switch (id) {
 #if EnableDHTSensorSupport	
 	case DEVICE_CHAMBER_HUMIDITY_SENSOR:
-		return DEVICETYPE_HUMIDITY_SENSOR;
+	case DEVICE_CHAMBER_ROOM_HUMIDITY_SENSOR:
+		return DEVICETYPE_ENVIRONMENT_SENSOR;
 #endif
 	case DEVICE_CHAMBER_DOOR:
 		return DEVICETYPE_SWITCH_SENSOR;

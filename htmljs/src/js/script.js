@@ -1,4 +1,4 @@
-    var T_CHART_REQUEST = 12000;
+    var T_CHART_REQUEST = 20000;
     var T_CHART_RETRYTO = 6000;
     var T_CHART_ZERODATA = 10000;
     var T_CHART_REFRESH = 2500;
@@ -9,9 +9,12 @@
     var BChart = {
         offset: 0,
         url: 'chart.php',
-        toggle: function(line,p) {
-            if(typeof p !="undefined" && p)  this.chart.togglePsiLine(line);
-            else this.chart.toggleLine(line);
+        calibrating:function(){
+            if(typeof this.chart =="undefined") return false;
+            return this.chart.calibrating;
+        },
+        toggle: function(line) {
+            this.chart.toggleLine(line);
         },
         updateFormula: function() {
             var coeff = this.chart.coefficients;
@@ -207,7 +210,7 @@
             }*/
     };
     /* LCD information */
-
+/*
     function parseStatusLine(line) {
         var status = {};
         var i = 0;
@@ -235,6 +238,16 @@
         status.StatusLine = line;
         return status;
     }
+*/
+function parseStateSince(line) {
+    var match;
+    if(match = /(\d+h\d\dm\d\d)/.exec(line)){
+        return match[1];
+    } else if (match = /(\d+m\d\d)/.exec(line)) {
+        return match[1];
+    }
+    return "";    
+}
 
 
     function renderLcdText(info) {
@@ -245,7 +258,10 @@
             if (temp < -10000) return "--.-";
             return (temp / 100).toFixed(1) + "&deg;" + info.tu;
         }
-        var status = parseStatusLine(info.sl);
+        var status = {};
+        status.ControlStateSince = parseStateSince(info.sl);
+        status.StatusLine = info.sl;
+        status.ControlState = info.st;
         status.ControlMode = info.md;
         status.unit = info.tu;
         status.BeerTemp = T(info.bt);
@@ -402,20 +418,27 @@
             if(msg.dev ==1){ //ispindel
                 Q(".gravity-device-pane").style.display="block";
                 doAll(".ispindel-info",function(d){
-                    d.style.display="block";
+                    //d.style.display="block";
+                    d.classList.remove("no-display");
                 });
 
                 doAll(".tilt-info",function(d){
-                    d.style.display="none";
+                    //d.style.display="none";
+                    d.classList.add("no-display");
+
                 });
 
             }else if(msg.dev ==2){
                 Q(".gravity-device-pane").style.display="block";
                 doAll(".ispindel-info",function(d){
-                    d.style.display="none";
+                    //d.style.display="none";
+                    d.classList.add("no-display");
+
                 });
                 doAll(".tilt-info",function(d){
-                    d.style.display="block";
+                    //d.style.display="block";
+                    d.classList.remove("no-display");
+
                 });
 
             }else{
@@ -450,7 +473,7 @@
 
         if (typeof msg["battery"] != "undefined" && Q("#iSpindel-battery")
             && msg.battery > 0)
-            Q("#iSpindel-battery").innerHTML = msg.battery;
+            Q("#iSpindel-battery").innerHTML ="" + parseFloat(msg.battery).toFixed(2) +"V";
 
         if(msg.lu > 84879460){
           var lu = (typeof msg["lu"] != "undefined")? new Date(msg.lu * 1000):new Date();
@@ -701,7 +724,7 @@
             if (Q("#gravity-device-last")) Q("#gravity-device-last").innerHTML = lu.shortLocalizedString();
         }
         // gravity
-        if(info.g > -1) updateGravity(window.plato? BrewMath.sg2pla(info.g/1000.0):info.g/1000.0);
+        if(!BChart.calibrating && info.g > 0) updateGravity(window.plato? BrewMath.sg2pla(info.g/1000.0):info.g/1000.0);
         if(info.t > -20000) Q("#gravity-device-temp").innerHTML= info.t/100 + "&deg;" + window.tempUnit;
     }
 
@@ -751,9 +774,14 @@
 
         ptcshow(c);
         if(typeof c["h"] != "undefined") {
-            Q("#humidity-info").style.display="";
+            Q("#humidity-info").classList.remove("no-display");
             Q("#humidity").innerHTML= (c.h <=100)?  (c.h + "%"):"--";
         }
+        if(typeof c["hr"] != "undefined") {
+            Q("#room-humidity-info").classList.remove("no-display");
+            Q("#room-humidity").innerHTML= (c.hr <=100)?  (c.hr + "%"):"--";
+        }
+
     }
 
     function connBWF() {

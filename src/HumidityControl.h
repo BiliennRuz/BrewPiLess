@@ -5,10 +5,14 @@
 #include "Actuator.h"
 #include "DHTSensor.h"
 #include "BPLSettings.h"
+#include "EnvironmentSensor.h"
+#if SMART_DISPLAY
+#include "SharedLcd.h"
+#endif
 
-#if EnableDHTSensorSupport
+#if EnableHumidityControlSupport
 
-#define MINIMUM_HUMIDITY_SENSOR_READ_PERIOD 10000
+#define MINIMUM_HUMIDITY_SENSOR_READ_PERIOD 5000
 #define IsValidHumidityValue(a) ((a) <=100)
 
 extern ValueActuator defaultActuator;
@@ -37,13 +41,19 @@ typedef enum _HumidityControlState{
 
 class HumidityControl{
 public:
-    static DHTSensor *dhtSensor;
+    static EnvironmentSensor *chamberSensor;
+    static EnvironmentSensor *roomSensor;
+
 	static Actuator* humidifier;
 	static Actuator* dehumidifier;
 
 
     HumidityControl():_mode(HC_ModeOff),_humidity(INVALID_HUMIDITY_VALUE),_state(HC_Idle),_prevState(HC_Idle){}    
-    
+    bool isChamberSensorInstalled(){ return chamberSensor != &nullEnvironmentSensor; }
+    bool isRoomSensorInstalled(){ return roomSensor != &nullEnvironmentSensor; }
+    uint8_t roomHumidity(){
+        return roomSensor->humidity();
+    }
     void updateState(){
         switch(_state){
             case HC_Idle:
@@ -87,11 +97,16 @@ public:
     }
 
     void loop(){
-            if(dhtSensor == NULL) return;
+            if(!isChamberSensorInstalled() && !isRoomSensorInstalled()) return;
             uint32_t currenttime = millis();
             if ((currenttime - _lastreadtime) > MINIMUM_HUMIDITY_SENSOR_READ_PERIOD){                
                 _lastreadtime = currenttime;
-                _humidity= dhtSensor->humidity();
+                _humidity= chamberSensor->humidity();
+
+                #if SMART_DISPLAY
+                smartDisplay.humidityData(isChamberSensorInstalled(),_humidity,isRoomSensorInstalled(),roomSensor->humidity());
+                #endif
+
                 //DBG_PRINTF("Humidity:%d\n",_humidity);
                 
                 if( _mode != HC_ModeOff && IsValidHumidityValue(_humidity)){
@@ -105,9 +120,6 @@ public:
     }
     bool isHumidityValid(){
         return  _humidity <=100; 
-    }
-    bool sensorInstalled(){
-        return dhtSensor != NULL;
     }
     
     

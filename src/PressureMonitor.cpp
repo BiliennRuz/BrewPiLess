@@ -12,20 +12,29 @@
 
 #include "PressureMonitor.h"
 
+#if SMART_DISPLAY
+#include "SharedLcd.h"
+#endif
+
 #if SupportPressureTransducer
 #define MinimumMonitorTime 10000
 #define MinimumControlCheckTime 1000
 
 #if FilterPressureReading
-#define LowPassFilterParameter 0.15
+#define LowPassFilterParameter 0.3
 #endif
 #define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
-#define NO_OF_SAMPLES   8          //Multisampling
+#define NO_OF_SAMPLES   4          //Multisampling
 
 PressureMonitorClass PressureMonitor;
 
 // for esp32
 #if ESP32
+
+#ifndef ADC1_GPIO36_CHANNEL
+#define ADC1_GPIO36_CHANNEL ADC1_CHANNEL_0
+#endif
+
 #define ConcateChanel(pin) ADC1_GPIO ## pin ## _CHANNEL
 #define AdcChannelFromPinNr(pin) ConcateChanel(pin)
 
@@ -40,6 +49,14 @@ int PressureMonitorClass::_readInternalAdc(void){
  
 #ifdef ESP8266
     return system_adc_read();
+
+/*    uint32_t adc_reading = 0;
+    for (int i = 0; i < NO_OF_SAMPLES; i++) {
+        adc_reading += system_adc_read();
+        delay(10);
+    }
+    return (int) (adc_reading /NO_OF_SAMPLES);
+*/
 #endif
 
 #if ESP32
@@ -87,10 +104,14 @@ void PressureMonitorClass::_readPressure(void){
     float psi = (reading - _settings->fb) * _settings->fa;
     #if FilterPressureReading
     _currentPsi = _currentPsi + LowPassFilterParameter *(psi - _currentPsi);
-    DBG_PRINTF("ADC:%d  PSIx10:%d currentx10:%d\n",(int)reading,(int)(psi*10),(int)_currentPsi*10);
+    DBG_PRINTF("ADC:%d  PSIx10:%d currentx10:%d\n",(int)reading,(int)(psi*10),(int)(_currentPsi*10));
     #else
     _currentPsi = psi;
     DBG_PRINTF("ADC:%d  PSIx10:%d\n",(int)reading,(int)(psi*10));
+    #endif
+
+    #if SMART_DISPLAY
+    smartDisplay.pressureData(psi);
     #endif
 }
 
